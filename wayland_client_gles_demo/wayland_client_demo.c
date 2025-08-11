@@ -3,27 +3,14 @@
  * Minimal Wayland client that creates a toplevel window using xdg-shell
  * and renders a rotating clear color using GLES2 + EGL via wl_egl_window.
  *
- * Requirements:
- *  - wayland-client
- *  - wayland-protocols (for xdg-shell)
- *  - wayland-egl
- *  - EGL
- *  - OpenGL ES 2.0
+ * This variant requests server-side decorations via xdg-decoration (zxdg).
  *
- * You must generate xdg-shell-client-protocol.h from the protocol XML shipped
- * with wayland-protocols. See the README section below for commands.
- *
- * Build (example):
+ * Build example:
  *   gcc -o wayland-egl-demo wayland-egl-demo.c `pkg-config --cflags --libs wayland-client wayland-egl egl glesv2` -lm
  *
- * Run under a Wayland compositor (e.g. Weston, Sway, GNOME on Wayland):
- *   ./wayland-egl-demo
- *
- * README: how to obtain the xdg-shell header
- *  - Install wayland-protocols (package name differs by distro).
- *  - Use wayland-scanner to generate the header:
- *      wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-client-protocol.h
- *    adjust the path to xdg-shell.xml depending on your distro.
+ * Generate protocol headers:
+ *   wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-client-protocol.h
+ *   wayland-scanner client-header /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml xdg-decoration-unstable-v1-client-protocol.h
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -40,14 +27,19 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 
-/* Generated header from xdg-shell.xml (see README above) */
+/* Generated headers from wayland-scanner */
 #include "xdg-shell-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h" /* for zxdg_* */
 
 /* Globals (for demo simplicity) */
 static struct wl_display *display = NULL;
 static struct wl_registry *registry = NULL;
 static struct wl_compositor *compositor = NULL;
 static struct xdg_wm_base *xdg_wm = NULL;
+
+/* decoration globals */
+static struct zxdg_decoration_manager_v1 *decoration_manager = NULL;
+static struct zxdg_toplevel_decoration_v1 *toplevel_decoration = NULL;
 
 static struct wl_surface *wl_surface = NULL;
 static struct xdg_surface *xdg_surface = NULL;
@@ -78,6 +70,8 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
 
 /* xdg_surface / toplevel configure */
 static void xdg_surface_configure(void *data, struct xdg_surface *surface, uint32_t serial) {
+    /* A decorate-mode change from compositor will come as an xdg_surface.configure;
+       the client should acknowledge configure after updating content appropriately. */
     xdg_surface_ack_configure(surface, serial);
 }
 static const struct xdg_surface_listener xdg_surface_listener = {
@@ -88,6 +82,8 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *toplevel, in
     if (w > 0 && h > 0) {
         width = w;
         height = h;
+        if (egl_window) wl_egl_window_resize(egl_window, width, height, 0, 0);
+        if (egl_display != EGL_NO_DISPLAY && egl_surface != EGL_NO_SURFACE) glViewport(0, 0, width, height);
     }
     configured = true;
 }
@@ -100,13 +96,38 @@ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
     .close = xdg_toplevel_close,
 };
 
-/* Registry handler: bind compositor and xdg_wm_base */
+/* zxdg decoration listener: compositor tells us which mode it chose */
+static void decoration_configure(void *data, struct zxdg_toplevel_decoration_v1 *decoration, uint32_t mode) {
+    /* mode is one of ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+       or ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE (and possibly others).
+       If compositor picks SERVER_SIDE, compositor will draw titlebar/borders.
+       If it picks CLIENT_SIDE, app must draw its own decorations (fallback).
+    */
+    if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE) {
+        fprintf(stderr, "Decoration: compositor chose SERVER_SIDE (use SSD)\n");
+        /* If compositor chose server-side decoration, the compositor will
+           expect the client NOT to draw its own titlebar. Typically you'd
+           resize/redraw content accordingly and ack configure. */
+    } else if (mode == ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE) {
+        fprintf(stderr, "Decoration: compositor chose CLIENT_SIDE (fallback to CSD)\n");
+    } else {
+        fprintf(stderr, "Decoration: unknown mode %u\n", mode);
+    }
+}
+static const struct zxdg_toplevel_decoration_v1_listener decoration_listener = {
+    .configure = decoration_configure,
+};
+
+/* Registry handler: bind compositor, xdg_wm_base and decoration manager */
 static void registry_handle_global(void *data, struct wl_registry *registry, uint32_t id, const char *interface, uint32_t version) {
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         compositor = wl_registry_bind(registry, id, &wl_compositor_interface, 4);
     } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         xdg_wm = wl_registry_bind(registry, id, &xdg_wm_base_interface, 1);
         xdg_wm_base_add_listener(xdg_wm, &xdg_wm_base_listener, NULL);
+    } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+        /* bind decoration manager (version 1) */
+        decoration_manager = wl_registry_bind(registry, id, &zxdg_decoration_manager_v1_interface, 1);
     }
 }
 static void registry_handle_global_remove(void *data, struct wl_registry *registry, uint32_t name) {
@@ -125,7 +146,17 @@ static void create_window() {
 
     xdg_toplevel = xdg_surface_get_toplevel(xdg_surface);
     xdg_toplevel_add_listener(xdg_toplevel, &xdg_toplevel_listener, NULL);
-    xdg_toplevel_set_title(xdg_toplevel, "wayland-egl-demo");
+    xdg_toplevel_set_title(xdg_toplevel, "wayland-egl-demo (with xdg-decoration request)");
+
+    /* If decoration manager was advertised, create decoration object and request SSD */
+    if (decoration_manager) {
+        toplevel_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(decoration_manager, xdg_toplevel);
+        zxdg_toplevel_decoration_v1_add_listener(toplevel_decoration, &decoration_listener, NULL);
+
+        /* Request server-side decorations (compositor may accept or ignore). */
+        zxdg_toplevel_decoration_v1_set_mode(toplevel_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+        /* Note: after requesting a mode, compositor will emit xdg_surface.configure. */
+    }
 
     wl_surface_commit(wl_surface);
 }
@@ -252,6 +283,16 @@ int main(int argc, char **argv) {
 
         /* Sleep ~16ms */
         usleep(16000);
+    }
+
+    /* cleanup (never reached in this demo loop) */
+    if (toplevel_decoration) {
+        zxdg_toplevel_decoration_v1_destroy(toplevel_decoration);
+        toplevel_decoration = NULL;
+    }
+    if (decoration_manager) {
+        zxdg_decoration_manager_v1_destroy(decoration_manager);
+        decoration_manager = NULL;
     }
 
     destroy_egl();

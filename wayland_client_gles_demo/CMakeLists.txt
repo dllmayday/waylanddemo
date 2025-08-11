@@ -15,14 +15,29 @@ pkg_check_modules(WAYLAND_SERVER REQUIRED wayland-server)
 pkg_check_modules(EGL REQUIRED egl)
 pkg_check_modules(GLES2 REQUIRED glesv2)
 
-# find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
+find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
 # set(XDG_SHELL_XML /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml)
 # set(XDG_SHELL_HEADER ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h)
+
+set(XDG_DECORATION_XML /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml)
+
+message("CMAKE_CURRENT_BINARY_DIR: ${CMAKE_CURRENT_BINARY_DIR}")
+
+set(XDG_DECORATION_C ${CMAKE_CURRENT_SOURCE_DIR}/xdg-decoration-unstable-v1-protocol.c)
+set(XDG_DECORATION_H ${CMAKE_CURRENT_SOURCE_DIR}/xdg-decoration-unstable-v1-client-protocol.h)
+
+add_custom_command(
+    OUTPUT ${XDG_DECORATION_C} ${XDG_DECORATION_H}
+    COMMAND ${WAYLAND_SCANNER} client-header ${XDG_DECORATION_XML} ${XDG_DECORATION_H}
+    COMMAND ${WAYLAND_SCANNER} private-code  ${XDG_DECORATION_XML} ${XDG_DECORATION_C}
+    DEPENDS ${XDG_DECORATION_XML}
+)
 
 # 添加可执行文件
 add_executable(wayland_client_gles_demo
     wayland_client_demo.c
     xdg-shell-client-protocol.c
+    ${XDG_DECORATION_C} 
 )
 
 # 链接库
