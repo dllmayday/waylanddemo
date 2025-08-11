@@ -4,7 +4,6 @@ project(wayland_client_gles_demo)
 # 设置编译选项
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_compile_definitions(WLR_USE_UNSTABLE)
 
 # 查找 Wayland 相关库
 find_package(PkgConfig REQUIRED)
